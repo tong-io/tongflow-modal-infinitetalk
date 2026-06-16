@@ -43,12 +43,12 @@ model_downloader = modal.App("model_downloader")
     .pip_install("huggingface_hub>=0.34.0,<1.0"),
     volumes={"/models": volume},
     timeout=14400,
-    secrets=[modal.Secret.from_name("huggingface")],
+    secrets=[modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})],
 )
 def _download() -> None:
     from huggingface_hub import hf_hub_download, snapshot_download
 
-    token = os.environ.get("HF_TOKEN")
+    token = os.environ.get("HF_TOKEN") or None
     if not token:
         raise RuntimeError(
             "HF_TOKEN is missing. Create Modal secret `huggingface` with your Hugging Face token."
