@@ -1,6 +1,6 @@
 # tongflow-modal-infinitetalk
 
-Official TongFlow plugin. Audio-driven lip-sync with **InfiniteTalk** (`MeiGen-AI/InfiniteTalk`, on `Wan-AI/Wan2.1-I2V-14B-480P` with a wav2vec audio encoder), running on a GPU via [Modal](https://modal.com). Turns an audio track plus a video (or image) into a talking-head video.
+Official [TongFlow](https://github.com/tong-io/tongflow) plugin. Audio-driven lip-sync with **InfiniteTalk** (`MeiGen-AI/InfiniteTalk`, on `Wan-AI/Wan2.1-I2V-14B-480P` with a wav2vec audio encoder), running on a GPU via [Modal](https://modal.com). Turns an audio track plus a video (or image) into a talking-head video.
 
 ## Capabilities
 
