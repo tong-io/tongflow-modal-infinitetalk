@@ -15,6 +15,10 @@ from typing import Any, Optional
 
 import modal
 from tongflow import deploy
+from tongflow.models.audio_image_gen_video import (
+    AudioImageGenVideoInput,
+    AudioImageGenVideoOutput,
+)
 from tongflow.models.audio_video_lip_sync import (
     AudioVideoLipSyncInput,
     AudioVideoLipSyncOutput,
@@ -45,9 +49,12 @@ DEFAULT_AUDIO_GUIDE_SCALE = 2.0
 DEFAULT_SIZE = "infinitetalk-480"
 DEFAULT_FPS = 25.0
 DEFAULT_LORA_SCALE = 1.0
-# Workflow: TrimAudioDuration 0:00–0:08, WanVideoImageToVideoMultiTalk frame_window_size=81.
-MAX_AUDIO_CLIP_S = 8.0
-MAX_FRAME_NUM = 81
+# InfiniteTalk generates in 81-frame windows (4n+1). For audio longer than one
+# window we run streaming mode, chaining windows so the video tracks the full
+# speech length instead of a single ~3.2s clip. A generous safety cap keeps
+# runaway audio from exhausting GPU time/memory (override via env).
+WINDOW_FRAME_NUM = 81
+MAX_VIDEO_S = float(os.environ.get("INFINITETALK_MAX_VIDEO_S", "60"))
 
 LIGHTX2V_LORA_PATH = (
     "/models/Kijai/WanVideo_comfy/"
@@ -91,36 +98,26 @@ def _probe_duration_seconds(path: str) -> float:
     return max(0.5, float(out.decode().strip()))
 
 
-def _trim_audio_wav(src: Path, dst: Path, max_seconds: float = MAX_AUDIO_CLIP_S) -> None:
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(src),
-            "-t",
-            str(max_seconds),
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-c:a",
-            "pcm_s16le",
-            str(dst),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _frame_num_for_duration(duration_s: float, fps: float = DEFAULT_FPS) -> int:
-    """InfiniteTalk expects frame_num as 4n+1; match workflow window (≤81 frames)."""
-    capped_s = min(duration_s, MAX_AUDIO_CLIP_S)
-    n = max(17, int(capped_s * fps))
+def _align_4np1(frames: int) -> int:
+    """InfiniteTalk requires frame counts of the form 4n+1; round down (min 17)."""
+    n = max(17, int(frames))
     k = (n - 1) // 4
-    frame_num = max(17, 4 * k + 1)
-    return min(frame_num, MAX_FRAME_NUM)
+    return max(17, 4 * k + 1)
+
+
+def _plan_frames(
+    duration_s: float, fps: float = DEFAULT_FPS
+) -> tuple[int, int, str]:
+    """Map audio length to (window_frame_num, max_frames_num, mode).
+
+    Short audio fits one clip; longer audio streams across 81-frame windows so
+    the generated video matches the full speech length (capped at MAX_VIDEO_S).
+    """
+    capped_s = min(duration_s, MAX_VIDEO_S)
+    total = _align_4np1(int(capped_s * fps))
+    window = min(total, WINDOW_FRAME_NUM)
+    mode = "streaming" if total > window else "clip"
+    return window, total, mode
 
 
 def _normalize_audio_to_wav(src: Path, dst: Path) -> None:
@@ -151,6 +148,8 @@ def _infinitetalk_cli_args(
     size: str,
     seed: int,
     frame_num: int,
+    max_frame_num: int,
+    mode: str,
     input_json: str,
     audio_save_dir: str,
 ) -> Any:
@@ -174,11 +173,13 @@ def _infinitetalk_cli_args(
         "--sample_shift",
         str(DEFAULT_SHIFT),
         "--mode",
-        "clip",
+        mode,
         "--motion_frame",
         str(DEFAULT_MOTION_FRAME),
         "--frame_num",
         str(frame_num),
+        "--max_frame_num",
+        str(max_frame_num),
         "--sample_steps",
         str(DEFAULT_SAMPLE_STEPS),
         "--sample_text_guide_scale",
@@ -308,64 +309,59 @@ class Inference:
         self._wav2vec_fe, self._audio_enc = self._gen.custom_init("cpu", WAV2VEC_DIR)
         print("[infinitetalk] Pipeline ready.", flush=True)
 
-    @modal.method()
-    @node_slot(NodeSlots.AUDIO_VIDEO_LIP_SYNC)
-    def audio_video_lip_sync(
-        self, input: AudioVideoLipSyncInput
-    ) -> AudioVideoLipSyncOutput:
-        video_b = _maybe_bytes(input.video)
-        audio_b = _maybe_bytes(input.audio)
-        if not video_b:
-            return AudioVideoLipSyncOutput(success=False, error="Missing video")
-        if not audio_b:
-            return AudioVideoLipSyncOutput(success=False, error="Missing audio")
+    def _generate_talking_video(
+        self,
+        *,
+        reference_bytes: bytes,
+        reference_name: str,
+        audio_b: bytes,
+        text: str | None,
+        seed_val: float | None,
+    ) -> tuple[bytes | None, str | None]:
+        """Shared InfiniteTalk core: (reference + audio) -> talking-head mp4.
 
-        prompt = (input.text or "").strip() or DEFAULT_PROMPT
-        seed = int(input.seed) if input.seed is not None else 42
+        InfiniteTalk's `cond_video` accepts either a still image or a video
+        reference, so both slots funnel through here; only `reference_name`
+        (file extension) differs. Returns (mp4_bytes, error).
+        """
+        prompt = (text or "").strip() or DEFAULT_PROMPT
+        seed = int(seed_val) if seed_val is not None else 42
 
         if not os.path.isdir(WAN_CKPT_DIR):
-            return AudioVideoLipSyncOutput(
-                success=False,
-                error=f"Wan checkpoint not found at {WAN_CKPT_DIR}. Run download.py first.",
-            )
+            return None, f"Wan checkpoint not found at {WAN_CKPT_DIR}. Run download.py first."
         if not os.path.isfile(INFINITETALK_WEIGHT):
-            return AudioVideoLipSyncOutput(
-                success=False,
-                error=f"InfiniteTalk weights not found at {INFINITETALK_WEIGHT}. Run download.py first.",
+            return None, (
+                f"InfiniteTalk weights not found at {INFINITETALK_WEIGHT}. "
+                "Run download.py first."
             )
         if not os.path.isfile(LIGHTX2V_LORA_PATH):
-            return AudioVideoLipSyncOutput(
-                success=False,
-                error=f"LightX2V LoRA not found at {LIGHTX2V_LORA_PATH}. Run download.py first.",
-            )
+            return None, f"LightX2V LoRA not found at {LIGHTX2V_LORA_PATH}. Run download.py first."
 
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
-            video_path = work / "reference.mp4"
+            reference_path = work / reference_name
             raw_audio_path = work / "input_audio"
-            normalized_audio = work / "normalized.wav"
             audio_path = work / "target_audio.wav"
-            video_path.write_bytes(video_b)
+            reference_path.write_bytes(reference_bytes)
             raw_audio_path.write_bytes(audio_b)
             try:
-                _normalize_audio_to_wav(raw_audio_path, normalized_audio)
-                _trim_audio_wav(normalized_audio, audio_path)
+                # Use the full speech (no length trim) so the video can track it.
+                _normalize_audio_to_wav(raw_audio_path, audio_path)
             except subprocess.CalledProcessError as e:
                 err = (e.stderr or e.stdout or str(e))[-2000:]
-                return AudioVideoLipSyncOutput(
-                    success=False, error=f"Audio prepare failed: {err}"
-                )
+                return None, f"Audio prepare failed: {err}"
 
             duration_s = _probe_duration_seconds(str(audio_path))
-            frame_num = _frame_num_for_duration(duration_s)
+            frame_num, max_frame_num, mode = _plan_frames(duration_s)
 
             save_stem = work / "output"
             audio_save_dir = work / "save_audio" / "clip"
             audio_save_dir.mkdir(parents=True, exist_ok=True)
 
             print(
-                f"[infinitetalk] Generating: {DEFAULT_SIZE} frames={frame_num} "
-                f"steps={DEFAULT_SAMPLE_STEPS} lightx2v LoRA",
+                f"[infinitetalk] Generating: {DEFAULT_SIZE} mode={mode} "
+                f"window={frame_num} total_frames={max_frame_num} "
+                f"audio={duration_s:.1f}s steps={DEFAULT_SAMPLE_STEPS} lightx2v LoRA",
                 flush=True,
             )
             gen = self._gen
@@ -386,7 +382,7 @@ class Inference:
                 json.dumps(
                     {
                         "prompt": prompt,
-                        "cond_video": str(video_path),
+                        "cond_video": str(reference_path),
                         "cond_audio": {"person1": str(audio_path)},
                         "video_audio": str(sum_audio),
                     },
@@ -397,7 +393,7 @@ class Inference:
 
             input_clip = {
                 "prompt": prompt,
-                "cond_video": str(video_path),
+                "cond_video": str(reference_path),
                 "cond_audio": {"person1": str(emb_path)},
                 "video_audio": str(sum_audio),
             }
@@ -406,6 +402,8 @@ class Inference:
                 size=DEFAULT_SIZE,
                 seed=seed,
                 frame_num=frame_num,
+                max_frame_num=max_frame_num,
+                mode=mode,
                 input_json=str(manifest),
                 audio_save_dir=str(audio_save_dir),
             )
@@ -421,7 +419,7 @@ class Inference:
                 audio_guide_scale=DEFAULT_AUDIO_GUIDE_SCALE,
                 seed=seed,
                 offload_model=False,
-                max_frames_num=frame_num,
+                max_frames_num=max_frame_num,
                 color_correction_strength=1.0,
                 extra_args=extra_args,
             )
@@ -436,12 +434,61 @@ class Inference:
             if not out_mp4.is_file():
                 candidates = list(work.glob("**/*.mp4"))
                 if not candidates:
-                    return AudioVideoLipSyncOutput(
-                        success=False, error="InfiniteTalk produced no output mp4"
-                    )
+                    return None, "InfiniteTalk produced no output mp4"
                 out_mp4 = candidates[0]
 
-            return AudioVideoLipSyncOutput(
-                success=True,
-                video=asset(out_mp4.read_bytes(), mime="video/mp4"),
-            )
+            return out_mp4.read_bytes(), None
+
+    @modal.method()
+    @node_slot(NodeSlots.AUDIO_VIDEO_LIP_SYNC)
+    def audio_video_lip_sync(
+        self, input: AudioVideoLipSyncInput
+    ) -> AudioVideoLipSyncOutput:
+        video_b = _maybe_bytes(input.video)
+        audio_b = _maybe_bytes(input.audio)
+        if not video_b:
+            return AudioVideoLipSyncOutput(success=False, error="Missing video")
+        if not audio_b:
+            return AudioVideoLipSyncOutput(success=False, error="Missing audio")
+
+        mp4, err = self._generate_talking_video(
+            reference_bytes=video_b,
+            reference_name="reference.mp4",
+            audio_b=audio_b,
+            text=input.text,
+            seed_val=input.seed,
+        )
+        if err or not mp4:
+            return AudioVideoLipSyncOutput(success=False, error=err or "no output")
+        return AudioVideoLipSyncOutput(
+            success=True,
+            video=asset(mp4, mime="video/mp4"),
+        )
+
+    @modal.method()
+    @node_slot(NodeSlots.AUDIO_IMAGE_GEN_VIDEO)
+    def audio_image_gen_video(
+        self, input: AudioImageGenVideoInput
+    ) -> AudioImageGenVideoOutput:
+        image_b = _maybe_bytes(input.image)
+        audio_b = _maybe_bytes(input.audio)
+        if not image_b:
+            return AudioImageGenVideoOutput(success=False, error="Missing image")
+        if not audio_b:
+            return AudioImageGenVideoOutput(success=False, error="Missing audio")
+
+        # AudioImageGenVideoInput exposes no seed; width/height are advisory and
+        # left to the plugin's DEFAULT_SIZE bucket.
+        mp4, err = self._generate_talking_video(
+            reference_bytes=image_b,
+            reference_name="reference.png",
+            audio_b=audio_b,
+            text=input.text,
+            seed_val=None,
+        )
+        if err or not mp4:
+            return AudioImageGenVideoOutput(success=False, error=err or "no output")
+        return AudioImageGenVideoOutput(
+            success=True,
+            video=asset(mp4, mime="video/mp4"),
+        )
