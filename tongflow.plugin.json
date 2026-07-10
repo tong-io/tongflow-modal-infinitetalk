@@ -1,4 +1,9 @@
 {
+    "plugin": {
+        "name": "InfiniteTalk",
+        "description": "Audio-driven lip-sync — turn an audio track plus a video or image into a talking-head video.",
+        "icon": "/plugins/tongflow-modal-infinitetalk.svg"
+    },
     "env": [
         {
             "key": "MODAL_TOKEN_ID",
