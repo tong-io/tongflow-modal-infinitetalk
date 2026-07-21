@@ -229,7 +229,7 @@ image = (
         "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.10"
     )
     .apt_install("git", "ffmpeg", "libsndfile1")
-    .pip_install("tongflow==0.1.0")
+    .pip_install("tongflow==0.2.13", "fastapi[standard]")
     .run_commands(
         f"git clone --depth 1 --branch {INFINITETALK_GIT_REF} "
         f"https://github.com/MeiGen-AI/InfiniteTalk.git {INFINITETALK_ROOT}",
@@ -492,3 +492,18 @@ class Inference:
             success=True,
             video=asset(mp4, mime="video/mp4"),
         )
+
+    @modal.fastapi_endpoint(method="GET", label=f"{Path(__file__).resolve().parent.name}-serve")
+    def serve(self, taskId: str = "", token: str = "", origin: str = ""):
+        from fastapi.responses import StreamingResponse
+        from tongflow import serve_stream_from_spec
+
+        return StreamingResponse(
+            serve_stream_from_spec(
+                origin, taskId, token, __file__,
+                invoke=lambda m, inp: getattr(self, m).local(inp),
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+        )
+
