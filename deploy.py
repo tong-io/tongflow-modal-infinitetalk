@@ -234,7 +234,7 @@ image = (
         "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.10"
     )
     .apt_install("git", "ffmpeg", "libsndfile1")
-    .pip_install("tongflow==0.2.13", "fastapi[standard]")
+    .pip_install("tongflow==0.2.16", "fastapi[standard]")
     .run_commands(
         f"git clone --depth 1 --branch {INFINITETALK_GIT_REF} "
         f"https://github.com/MeiGen-AI/InfiniteTalk.git {INFINITETALK_ROOT}",
