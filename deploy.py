@@ -27,6 +27,11 @@ from tongflow.node_slots import NodeSlots
 from tongflow.protocol import asset, prompt_media_to_bytes
 from tongflow.slots import node_slot
 
+# Slots this plugin is the default implementation of: the node picker lists
+# it first and a newly added node preselects it. Read statically by the
+# scanner (never executed), so any SDK version imports this file fine.
+TONGFLOW_DEFAULT_SLOTS = ["audio-image-gen-video"]
+
 _cfg: dict[str, Any] = {}
 _volume_name = str(_cfg.get("volumeName") or "models")
 volume = modal.Volume.from_name(_volume_name, create_if_missing=True)
