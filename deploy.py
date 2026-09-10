@@ -25,7 +25,42 @@ from tongflow.models.audio_video_lip_sync import (
 )
 from tongflow.node_slots import NodeSlots
 from tongflow.protocol import asset, prompt_media_to_bytes
-from tongflow.slots import node_slot
+from tongflow.slots import current_params, node_slot
+
+
+def _adv(name: str, default):
+    """Advanced-section override (``TONGFLOW_SLOT_PARAMS``) or the plugin default."""
+    v = current_params().get(name)
+    if v is None:
+        return default
+    if isinstance(default, bool):
+        return bool(v)
+    if isinstance(default, int):
+        return int(v)
+    if isinstance(default, float):
+        return float(v)
+    return v
+
+# Per-run knobs offered under the node's collapsed "Advanced" section.
+# Pure literal (the platform scanner reads it by AST, never imports this
+# module). Values reach the handlers via current_params(); an untouched
+# control is absent there and falls back to the plugin default.
+TONGFLOW_SLOT_PARAMS = {
+    "audio-image-gen-video": {
+        "steps": {"type": "integer", "default": 4, "min": 2, "max": 12, "label": "Steps"},
+        "size": {"type": "select", "options": ["infinitetalk-480", "infinitetalk-720"], "default": "infinitetalk-480", "label": "Resolution"},
+        "audio_guide_scale": {"type": "number", "default": 2.0, "min": 1.0, "max": 6.0, "step": 0.5, "label": "Audio guidance"},
+        "text_guide_scale": {"type": "number", "default": 1.0, "min": 1.0, "max": 6.0, "step": 0.5, "label": "Text guidance"},
+        "shift": {"type": "number", "default": 2.0, "min": 1.0, "max": 10.0, "step": 0.5, "label": "Sample shift"},
+    },
+    "audio-video-lip-sync": {
+        "steps": {"type": "integer", "default": 4, "min": 2, "max": 12, "label": "Steps"},
+        "size": {"type": "select", "options": ["infinitetalk-480", "infinitetalk-720"], "default": "infinitetalk-480", "label": "Resolution"},
+        "audio_guide_scale": {"type": "number", "default": 2.0, "min": 1.0, "max": 6.0, "step": 0.5, "label": "Audio guidance"},
+        "text_guide_scale": {"type": "number", "default": 1.0, "min": 1.0, "max": 6.0, "step": 0.5, "label": "Text guidance"},
+        "shift": {"type": "number", "default": 2.0, "min": 1.0, "max": 10.0, "step": 0.5, "label": "Sample shift"},
+    },
+}
 
 # Slots this plugin is the default implementation of: the node picker lists
 # it first and a newly added node preselects it. Read statically by the
@@ -176,7 +211,7 @@ def _infinitetalk_cli_args(
         "--size",
         size,
         "--sample_shift",
-        str(DEFAULT_SHIFT),
+        str(_adv("shift", DEFAULT_SHIFT)),
         "--mode",
         mode,
         "--motion_frame",
@@ -186,11 +221,11 @@ def _infinitetalk_cli_args(
         "--max_frame_num",
         str(max_frame_num),
         "--sample_steps",
-        str(DEFAULT_SAMPLE_STEPS),
+        str(_adv("steps", DEFAULT_SAMPLE_STEPS)),
         "--sample_text_guide_scale",
-        str(DEFAULT_TEXT_GUIDE_SCALE),
+        str(_adv("text_guide_scale", DEFAULT_TEXT_GUIDE_SCALE)),
         "--sample_audio_guide_scale",
-        str(DEFAULT_AUDIO_GUIDE_SCALE),
+        str(_adv("audio_guide_scale", DEFAULT_AUDIO_GUIDE_SCALE)),
         "--audio_save_dir",
         audio_save_dir,
         "--base_seed",
@@ -234,7 +269,7 @@ image = (
         "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.10"
     )
     .apt_install("git", "ffmpeg", "libsndfile1")
-    .pip_install("tongflow==0.2.21", "fastapi[standard]")
+    .pip_install("tongflow==0.3.3", "fastapi[standard]")
     .run_commands(
         f"git clone --depth 1 --branch {INFINITETALK_GIT_REF} "
         f"https://github.com/MeiGen-AI/InfiniteTalk.git {INFINITETALK_ROOT}",
@@ -404,7 +439,7 @@ class Inference:
             }
             extra_args = _infinitetalk_cli_args(
                 gen,
-                size=DEFAULT_SIZE,
+                size=_adv("size", DEFAULT_SIZE),
                 seed=seed,
                 frame_num=frame_num,
                 max_frame_num=max_frame_num,
@@ -415,13 +450,13 @@ class Inference:
 
             video_tensor = self._wan_i2v.generate_infinitetalk(
                 input_clip,
-                size_buckget=DEFAULT_SIZE,
+                size_buckget=_adv("size", DEFAULT_SIZE),
                 motion_frame=DEFAULT_MOTION_FRAME,
                 frame_num=frame_num,
-                shift=DEFAULT_SHIFT,
-                sampling_steps=DEFAULT_SAMPLE_STEPS,
-                text_guide_scale=DEFAULT_TEXT_GUIDE_SCALE,
-                audio_guide_scale=DEFAULT_AUDIO_GUIDE_SCALE,
+                shift=_adv("shift", DEFAULT_SHIFT),
+                sampling_steps=_adv("steps", DEFAULT_SAMPLE_STEPS),
+                text_guide_scale=_adv("text_guide_scale", DEFAULT_TEXT_GUIDE_SCALE),
+                audio_guide_scale=_adv("audio_guide_scale", DEFAULT_AUDIO_GUIDE_SCALE),
                 seed=seed,
                 offload_model=False,
                 max_frames_num=max_frame_num,
