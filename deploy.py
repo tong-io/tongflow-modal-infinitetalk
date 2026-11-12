@@ -290,7 +290,9 @@ image = (
     .run_commands(
         f"cd {INFINITETALK_ROOT} && pip install -r requirements.txt",
         # requirements.txt pulls latest HF libs; keep xfuser-compatible diffusers, cap transformers.
-        "pip install 'transformers==4.49.0' 'tokenizers==0.21.0'",
+        # diffusers>=0.40 needs huggingface_hub>=1.23, which transformers 4.49 cannot use;
+        # xfuser>=0.5 imports diffusers' Flux2 Klein pipeline, which needs Qwen3 in transformers.
+        "pip install 'transformers==4.49.0' 'tokenizers==0.21.0' 'diffusers==0.38.0' 'xfuser==0.4.5'",
         "pip install librosa kokoro",
         # wan/t5.py touches CUDA at import time; validate xfuser→diffusers path instead.
         f"PYTHONPATH={INFINITETALK_ROOT} python -c \""
